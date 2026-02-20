@@ -1,5 +1,5 @@
 # install once
-install.packages("bigsnpr")
+#install.packages("bigsnpr")
 library(bigsnpr)
 library(bigstatsr)
 
