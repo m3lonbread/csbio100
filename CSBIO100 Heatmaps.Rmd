@@ -1,0 +1,189 @@
+---
+title: "heatmap"
+output: html_document
+date: "2026-02-20"
+---
+
+allele frequency heatmap
+
+```{r}
+# CYP2D6 region (slightly padded)
+start_bp <- 42100000
+end_bp   <- 42250000
+
+ind.cyp <- which(map$chromosome == 22 &
+                 map$physical.pos >= start_bp &
+                 map$physical.pos <= end_bp)
+
+length(ind.cyp)
+```
+
+```{r}
+maf <- bigsnpr::snp_MAF(G, ind.col = ind.cyp)
+
+# keep informative SNPs
+ind.cyp2 <- ind.cyp[maf >= 0.05 & maf <= 0.95]
+
+cat("SNPs retained:", length(ind.cyp2), "\n")
+```
+
+
+```{r}
+# extract genotype submatrix
+X <- as.matrix(G[, ind.cyp2])
+
+# add population labels
+pop_labels <- fam2$Super.Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+unique(pop_labels)
+```
+
+```{r}
+# compute allele frequency per superpopulation
+pop_levels <- unique(pop_labels)
+
+af_matrix <- matrix(NA,
+                    nrow = length(pop_levels),
+                    ncol = ncol(X))
+
+rownames(af_matrix) <- pop_levels
+colnames(af_matrix) <- paste0("SNP_", 1:ncol(X))
+
+for (p in pop_levels) {
+  inds <- which(pop_labels == p)
+  af_matrix[p, ] <- colMeans(X[inds, ], na.rm = TRUE) / 2
+}
+```
+
+```{r}
+install.packages("pheatmap")
+library(pheatmap)
+
+pheatmap(af_matrix,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency Heatmap")
+```
+
+
+
+Average frequency of non-reference (variant) alleles across CYP2D6 SNPs within each superpopulation.
+--> How genetically different populations are at the CYP2D6 locus.
+--> Quantifies population-level genetic variation (beyond PCA visualization).
+```{r}
+# use your previously filtered ind.cyp2
+X <- as.matrix(G[, ind.cyp2])
+
+pop_labels <- fam2$Super.Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+pop_levels <- unique(pop_labels)
+mean_burden <- data.frame()
+
+for (p in pop_levels) {
+  inds <- which(pop_labels == p)
+  mean_alt <- mean(colMeans(X[inds, ], na.rm = TRUE) / 2)
+  mean_burden <- rbind(mean_burden,
+                       data.frame(Population = p,
+                                  MeanAlternateAllele = mean_alt))
+}
+
+library(ggplot2)
+ggplot(mean_burden,
+       aes(x = Population,
+           y = MeanAlternateAllele,
+           fill = Population)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Mean CYP2D6 Alternate Allele Burden by Superpopulation",
+       y = "Mean Alternate Allele Frequency") +
+  theme_minimal()
+```
+
+
+```{r}
+# Subpopulation labels 
+pop_sub <- fam2$Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+super_sub <- fam2$Super.Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+# keep AFR + EAS individuals
+keep_inds <- which(super_sub %in% c("AFR", "EAS"))
+
+X_sub <- as.matrix(G[keep_inds, ind.locus2])
+
+pop_sub_keep <- pop_sub[keep_inds]
+```
+
+```{r}
+subpops <- unique(pop_sub_keep)
+
+af_matrix <- matrix(NA,
+                    nrow = length(subpops),
+                    ncol = ncol(X_sub))
+
+rownames(af_matrix) <- subpops
+colnames(af_matrix) <- paste0("SNP_", 1:ncol(X_sub))
+
+for (p in subpops) {
+  inds <- which(pop_sub_keep == p)
+  af_matrix[p, ] <- colMeans(X_sub[inds, ], na.rm = TRUE) / 2
+}
+
+var_keep <- apply(af_matrix, 2, var) > 0.001
+af_matrix <- af_matrix[, var_keep]
+```
+
+Alternate allele frequency at each SNP.
+```{r}
+library(pheatmap)
+pheatmap(af_matrix,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         show_colnames = FALSE, #SNPs
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency\nAFR vs EAS Subpopulations")
+```
+
+
+```{r}
+# keep only ESN and CDX
+af_matrix_pair <- af_matrix[c("ESN", "CDX"), ]
+
+# check dimensions
+dim(af_matrix_pair)
+
+# difference in allele frequency between the two populations
+snp_diff <- abs(af_matrix_pair["ESN", ] - af_matrix_pair["CDX", ])
+
+# select top 30 SNPs
+top_snps <- order(snp_diff, decreasing = TRUE)[1:50]
+af_matrix_pair_top <- af_matrix_pair[, top_snps]
+
+pheatmap(af_matrix_pair_top,
+         cluster_rows = FALSE,  # only two rows, no need to cluster
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency\nESN vs CDX Subpopulations")
+
+```
+
+```{r}
+af_matrix_pair_all <- af_matrix[c("ESN", "CDX"), ]
+pheatmap(af_matrix_pair_all,
+         cluster_rows = FALSE,  # only 2 populations
+         cluster_cols = TRUE,   # cluster SNPs to show pattern
+         show_colnames = FALSE, # hide individual SNP labels to avoid blob
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency\nESN vs CDX Subpopulations")
+```
+
+
+
