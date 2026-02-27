@@ -1,0 +1,164 @@
+---
+title: "pop_pk"
+author: "Grace Zang"
+date: "2026-02-27"
+output: pdf_document
+---
+
+```{r setup}
+library(data.table)
+
+set.seed(1)
+
+# -----------------------------
+# 1) Study-level constants
+# -----------------------------
+N  <- 150
+N_male <- 75
+N_fem  <- 75
+
+# Sex coding matches Yang paper: Sex=1 male, 0 female :contentReference[oaicite:2]{index=2}
+SEX <- c(rep(1, N_male), rep(0, N_fem))
+
+# Weight distributions from Tam 2005:
+# females mean 50 kg (SD 5.1), males mean 71 kg (SD 9.9) :contentReference[oaicite:3]{index=3}
+WT <- numeric(N)
+WT[SEX == 1] <- pmax(rnorm(sum(SEX==1), mean=71, sd=9.9), 40)
+WT[SEX == 0] <- pmax(rnorm(sum(SEX==0), mean=50, sd=5.1), 35)
+
+# Stomach condition: about 68% had food (meal) in Tam 2005 :contentReference[oaicite:4]{index=4}
+# Yang model uses Empty=1 for empty stomach, 0 for full stomach :contentReference[oaicite:5]{index=5}
+p_meal <- 0.68
+EMPTY <- rbinom(N, size=1, prob=1 - p_meal)  # EMPTY=1 with prob 0.32
+
+# Dose: most participants 0.5–0.7 g/kg :contentReference[oaicite:6]{index=6}
+DOSE_GKG <- runif(N, min=0.5, max=0.7)
+D_g <- DOSE_GKG * WT  # grams ethanol
+
+# -----------------------------
+# 2) Yang 2011 one-comp model params with covariates
+#    (final model on p.5-6) :contentReference[oaicite:7]{index=7}
+# -----------------------------
+# Fixed effects
+b1 <- 4.283
+b2 <- 2.100
+b3 <- -0.880
+b_wt    <- 0.015
+b_empty <- 0.194
+b_sex   <- -0.154
+
+# Random effects covariance matrix (u-hat) reported :contentReference[oaicite:8]{index=8}
+# [ b1  b2  b3 ] variances and covariances:
+# var(b1)=0.209, var(b2)=0.409, var(b3)=0.192, cov(b1,b3)=0.173
+Omega <- matrix(c(
+  0.209, 0.000, 0.173,
+  0.000, 0.409, 0.000,
+  0.173, 0.000, 0.192
+), nrow=3, byrow=TRUE)
+
+# Draw eta ~ MVN(0, Omega) without extra packages
+L <- chol(Omega)
+Z <- matrix(rnorm(N*3), ncol=3)
+ETA <- Z %*% L
+eta1 <- ETA[,1]  # for Cl
+eta2 <- ETA[,2]  # for ka
+eta3 <- ETA[,3]  # for kel
+
+# Individual parameters (exact forms from paper) :contentReference[oaicite:9]{index=9}
+Cl  <- exp(b1 + b_wt * WT + eta1)
+ka  <- exp(b2 + b_empty * EMPTY + eta2)
+kel <- exp(b3 + b_sex * SEX + eta3)
+
+# -----------------------------
+# 3) Observation time grid (hours)
+#    Mimics: dense early (10–15 min), then wider later :contentReference[oaicite:10]{index=10}
+# -----------------------------
+t_early <- seq(0.17, 1.0, by=0.17)  # ~10 min steps up to 1 h
+t_late  <- seq(1.5, 3.5, by=0.5)    # then every 30 min
+times <- c(0, t_early, t_late)
+
+# -----------------------------
+# 4) Concentration model (closed-form)
+#    Ct = D * ka * kel / (Cl*(ka-kel)) * (exp(-kel t) - exp(-ka t)) :contentReference[oaicite:11]{index=11}
+# -----------------------------
+Ct_fun <- function(t, D, Cl, ka, kel){
+  # avoid numerical issues if ka ~ kel
+  if (abs(ka - kel) < 1e-6) return(0)
+  D * ka * kel / (Cl * (ka - kel)) * (exp(-kel*t) - exp(-ka*t))
+}
+
+# Residual error: Yang reports s^2 = 11.46 (Table 3) :contentReference[oaicite:12]{index=12}
+# We'll treat this as additive Normal noise with sd = sqrt(11.46).
+sigma <- sqrt(11.46)
+
+# -----------------------------
+# 5) Build long dataset
+# -----------------------------
+out <- rbindlist(lapply(1:N, function(i){
+  conc <- sapply(times, Ct_fun, D=D_g[i], Cl=Cl[i], ka=ka[i], kel=kel[i])
+  dv <- pmax(conc + rnorm(length(times), 0, sigma), 0)  # BAC can't go <0
+
+  data.table(
+    ID = i,
+    TIME = times,
+    DV = dv,
+    SEX = SEX[i],
+    WT = WT[i],
+    EMPTY = EMPTY[i],
+    DOSE_GKG = DOSE_GKG[i]
+  )
+}))
+
+# Add dosing/event columns for nlmixr2
+out[, `:=`(AMT=0, EVID=0, CMT=1)]
+out[TIME==0, `:=`(AMT = D_g[ID], EVID=1, DV=NA_real_)]
+
+# Save
+fwrite(out, "synthetic_yang2011_popPK.csv")
+out[]
+```
+
+
+
+```{r}
+library(data.table)
+library(nlmixr2)
+
+dt <- fread("synthetic_yang2011_popPK.csv")
+
+yang_full <- function() {
+  ini({
+    b1 <- 4.283
+    b2 <- 2.100
+    b3 <- -0.880
+    b_wt    <- 0.015
+    b_empty <- 0.194
+    b_sex   <- -0.154
+
+    eta.cl  ~ 0.2
+    eta.ka  ~ 0.4
+    eta.kel ~ 0.2
+
+    prop.err <- 0.15
+  })
+  model({
+    Cl  <- exp(b1 + b_wt * WT + eta.cl)
+    ka  <- exp(b2 + b_empty * EMPTY + eta.ka)
+    kel <- exp(b3 + b_sex * SEX + eta.kel)
+
+    d/dt(depot)   = -ka * depot
+    d/dt(central) =  ka * depot - kel * central
+
+    cp <- central
+    cp ~ prop(prop.err)
+  })
+}
+
+```
+
+```{r}
+fit_full <- nlmixr2(yang_full, dt, est="saem")
+print(fit_full)
+plot(fit_full)
+```
+ 
