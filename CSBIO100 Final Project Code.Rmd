@@ -5,8 +5,6 @@ date: "2026-02-20"
 ---
 data_wrangling.R
 ```{r}
-# install once
-#install.packages("bigsnpr")
 library(bigsnpr)
 library(bigstatsr)
 
@@ -17,7 +15,9 @@ bigsnpr::download_1000G("data_1000G")
 bedfile <- "data_1000G/1000G_phase3_common_norel.bed"
 
 # IMPORTANT:
-rds <-  snp_readBed(bedfile)
+#rds <-  snp_readBed(bedfile)
+#obj <- snp_attach(rds)
+rds <- sub("\\.bed$", ".rds", bedfile)
 obj <- snp_attach(rds)
 
 G   <- obj$genotypes
@@ -165,6 +165,86 @@ cat("Distance =", max(dist_matrix), "\n")
 ```
 
 
+
+
+# Bootstrap Resampling for Cluster Stability (ARI)
+Each bootstrap: Resample individuals → Recompute PCA → Recluster → Compare with truth
+Then we compute: CI95% = [Q25%, Q75%]
+```{r}
+library(mclust)
+set.seed(123)
+
+B <- 1000   # use 10000 for final submission
+n <- length(ind_rows)
+
+# ----- ORIGINAL PCA + CLUSTERING -----
+X_orig <- as.matrix(G[ind_rows, ind.locus2])
+keep <- apply(X_orig, 2, var) > 0
+X_orig <- X_orig[, keep, drop = FALSE]
+X_orig <- scale(X_orig)
+
+pca_orig <- prcomp(X_orig, center = FALSE, scale. = FALSE)
+
+# Use first 2 PCs for clustering
+pc_orig <- pca_orig$x[, 1:2]
+
+# k-means clustering (k=2)
+km_orig <- kmeans(pc_orig, centers = 2, nstart = 20)
+orig_clusters <- km_orig$cluster
+
+# True labels (AFR vs EAS)
+true_labels <- fam2$Super.Population[match(fam$sample.ID[ind_rows], fam2$sample.ID)]
+
+# Convert AFR/EAS to numeric labels
+true_labels_num <- as.numeric(factor(true_labels))
+
+# ARI between original clustering and true labels
+ari_original <- adjustedRandIndex(orig_clusters, true_labels_num)
+cat("Original ARI:", ari_original, "\n")
+```
+BOOTSTRAP
+```{r}
+# ----- BOOTSTRAP -----
+ari_vals <- numeric(B)
+for (b in 1:B) {
+  # resample individuals with replacement
+  boot_idx <- sample(1:n, n, replace = TRUE)
+  
+  X_boot <- X_orig[boot_idx, ]
+  
+  # recompute PCA
+  pca_boot <- prcomp(X_boot, center = FALSE, scale. = FALSE)
+  pc_boot <- pca_boot$x[, 1:2]
+  
+  # recluster
+  km_boot <- kmeans(pc_boot, centers = 2, nstart = 10)
+  boot_clusters <- km_boot$cluster
+  
+  # true labels for bootstrap sample
+  boot_true <- true_labels_num[boot_idx]
+  
+  # compute ARI
+  ari_vals[b] <- adjustedRandIndex(boot_clusters, boot_true)
+}
+```
+
+```{r}
+# ----- SUMMARY STATISTICS -----
+mean_ari <- mean(ari_vals)
+ci <- quantile(ari_vals, c(0.025, 0.975))
+
+cat("Bootstrap Mean ARI:", mean_ari, "\n")
+cat("95% CI:", ci[1], "-", ci[2], "\n")
+
+# ----- PLOT DISTRIBUTION -----
+hist(ari_vals, breaks = 40,
+     main = "Bootstrap Distribution of ARI (AFR vs EAS)",
+     xlab = "Adjusted Rand Index",
+     col = "lightblue", border = "white")
+
+abline(v = ci, col = "red", lwd = 2)
+abline(v = mean_ari, col = "darkblue", lwd = 2)
+```
 
 
 
