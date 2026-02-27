@@ -58,14 +58,14 @@ for (p in pop_levels) {
 ```
 
 ```{r}
-install.packages("pheatmap")
+#install.packages("pheatmap")
 library(pheatmap)
 
 pheatmap(af_matrix,
          cluster_rows = TRUE,
          cluster_cols = TRUE,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
-         main = "CYP2D6 Allele Frequency Heatmap")
+         main = "CYP2D6 Allele Frequency Heatmap\nSuperpopulations")
 ```
 
 
@@ -117,7 +117,7 @@ super_sub <- fam2$Super.Population[
 # keep AFR + EAS individuals
 keep_inds <- which(super_sub %in% c("AFR", "EAS"))
 
-X_sub <- as.matrix(G[keep_inds, ind.locus2])
+X_sub <- as.matrix(G[keep_inds, ind.cyp])
 
 pop_sub_keep <- pop_sub[keep_inds]
 ```
@@ -147,7 +147,7 @@ library(pheatmap)
 pheatmap(af_matrix,
          cluster_rows = TRUE,
          cluster_cols = TRUE,
-         show_colnames = FALSE, #SNPs
+         #show_colnames = FALSE, #SNPs
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency\nAFR vs EAS Subpopulations")
 ```
@@ -164,7 +164,7 @@ dim(af_matrix_pair)
 snp_diff <- abs(af_matrix_pair["ESN", ] - af_matrix_pair["CDX", ])
 
 # select top 30 SNPs
-top_snps <- order(snp_diff, decreasing = TRUE)[1:50]
+top_snps <- order(snp_diff, decreasing = TRUE)#[1:20]
 af_matrix_pair_top <- af_matrix_pair[, top_snps]
 
 pheatmap(af_matrix_pair_top,
@@ -172,6 +172,8 @@ pheatmap(af_matrix_pair_top,
          cluster_cols = TRUE,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency\nESN vs CDX Subpopulations")
+         #\n(Top 30 SNPs by Allele Frequence Difference)")
+    
 
 ```
 
@@ -184,6 +186,63 @@ pheatmap(af_matrix_pair_all,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency\nESN vs CDX Subpopulations")
 ```
+
+
+
+```{r}
+# AFR vs EAS
+keep_inds_super <- which(super_sub %in% c("AFR", "EAS"))
+X_super <- as.matrix(G[keep_inds_super, ind.cyp2])
+pop_super_keep <- super_sub[keep_inds_super]
+
+superpops <- unique(pop_super_keep)
+
+af_matrix_super <- sapply(superpops, function(p) {
+  inds <- which(pop_super_keep == p)
+  colMeans(X_super[inds, ], na.rm = TRUE)/2
+}) 
+af_matrix_super <- t(af_matrix_super)
+rownames(af_matrix_super) <- superpops
+colnames(af_matrix_super) <- paste0("SNP_", 1:ncol(af_matrix_super))
+
+# SNP differences
+snp_diff_super <- abs(af_matrix_super["AFR", ] - af_matrix_super["EAS", ])
+top_snps_super <- order(snp_diff_super, decreasing = TRUE)[1:20]
+
+# ESN vs CDX already computed as af_matrix_pair
+snp_diff_sub <- abs(af_matrix_pair["ESN", ] - af_matrix_pair["CDX", ])
+top_snps_sub <- order(snp_diff_sub, decreasing = TRUE)[1:20]
+
+# Overlap of top SNPs
+overlap_snps <- intersect(top_snps_super, top_snps_sub)
+cat("Number of SNPs overlapping top 20 in both comparisons:", length(overlap_snps), "\n")
+overlap_snps
+
+# Optional: get physical positions of these SNPs
+snp_positions <- map$physical.pos[ind.cyp2]
+data.frame(
+  SNP_index = overlap_snps,
+  Position = snp_positions[overlap_snps],
+  AFR_vs_EAS_diff = snp_diff_super[overlap_snps],
+  ESN_vs_CDX_diff = snp_diff_sub[overlap_snps]
+)
+```
+
+```{r}
+# Get physical positions of overlapping SNPs
+overlap_inds <- c(27, 35, 38, 32, 44, 21, 6, 46, 45)
+snp_positions <- map$physical.pos[ind.cyp2][overlap_inds]
+snp_ids <- map$SNP[ind.cyp2][overlap_inds]  # if you have rsIDs
+
+data.frame(
+  SNP_index = overlap_inds,
+  SNP_ID = snp_ids,
+  Position = snp_positions,
+  AFR_vs_EAS_diff = snp_diff_super[overlap_inds],
+  ESN_vs_CDX_diff = snp_diff_sub[overlap_inds]
+)
+```
+
 
 
 
