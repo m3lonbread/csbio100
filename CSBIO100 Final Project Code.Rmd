@@ -3,7 +3,10 @@ title: "csbio100 project"
 output: html_document
 date: "2026-02-20"
 ---
-data_wrangling.R
+PCA → genetic differentiation
+CNV heatmap → functional pharmacogenomic variation
+
+# Data Wrangling: SNP data from 1000 genomes dataset
 ```{r}
 library(bigsnpr)
 library(bigstatsr)
@@ -33,13 +36,14 @@ stopifnot(all(c("sample.ID","Population","Super.Population") %in% names(fam2)))
 
 ```
 
-superpop_pca.R
+1. PCA 
+# 1a. PCA on Superpopulations
+--> identify most separated superpopulations
 ```{r}
-# ----- PARAMETERS -----
 start_bp <- 41500000
 end_bp   <- 43500000
 
-# ----- SNP SUBSET (locus window) -----
+# SNP SUBSET (locus window) 
 ind.locus <- which(map$chromosome == 22 &
                      map$physical.pos >= start_bp &
                      map$physical.pos <= end_bp)
@@ -50,20 +54,18 @@ ind.locus2 <- ind.locus[maf >= 0.05 & maf <= 0.95]
 
 cat("SNPs after MAF:", length(ind.locus2), "\n")
 
-# ----- PCA ON INDIVIDUALS -----
+# PCA ON INDIVIDUALS
 X <- as.matrix(G[, ind.locus2])
 
 # drop zero-variance SNPs
 keep <- apply(X, 2, var) > 0
 X <- X[, keep, drop = FALSE]
-
-# scale
 X <- scale(X)
 
 # PCA
 pca2 <- prcomp(X, center = FALSE, scale. = FALSE)
 
-# ----- MERGE LABELS -----
+# MERGE LABELS 
 pca2_df <- data.frame(
   sample.ID = fam$sample.ID,
   PC1 = pca2$x[,1],
@@ -73,7 +75,7 @@ pca2_df <- data.frame(
 
 pca2_df <- merge(pca2_df, fam2, by = "sample.ID", all.x = TRUE)
 
-# ----- PLOT (colored by superpop) -----
+#  PLOT (colored by superpop) 
 sp <- factor(pca2_df$Super.Population)
 
 plot(pca2_df$PC1, pca2_df$PC2,
@@ -83,17 +85,17 @@ plot(pca2_df$PC1, pca2_df$PC2,
 
 legend("topright", legend = levels(sp),
        col = seq_along(levels(sp)), pch = 19, cex = 0.8)
-
 ```
 
-afr_eas_pop_pca
+# 1b. PCA on Subpopulations (AFR and EAS) 
+--> identify most separated subpopulations
 ```{r}
-# ----- SUBSET TO AFR + EAS INDIVIDUALS -----
+# SUBSET TO AFR + EAS INDIVIDUALS
 pops_keep <- c("AFR", "EAS")
 sub_ids <- fam2$sample.ID[fam2$Super.Population %in% pops_keep]
 ind_rows <- which(fam$sample.ID %in% sub_ids)
 
-# ----- PCA RECOMPUTED ON ONLY AFR+EAS INDIVIDUALS -----
+# PCA RECOMPUTED ON ONLY AFR+EAS INDIVIDUALS 
 # reuse the SAME SNP set ind.locus2 from Script 2 (important)
 X_sub <- as.matrix(G[ind_rows, ind.locus2])
 
@@ -113,7 +115,7 @@ pca_sub_df <- data.frame(
 
 pca_sub_df <- merge(pca_sub_df, fam2, by = "sample.ID")
 
-# ----- POPULATION CENTROIDS (GBR/FIN/etc — but here only AFR+EAS pops exist) -----
+# POPULATION CENTROIDS (GBR/FIN/etc — but here only AFR+EAS pops exist)
 centroids_pop <- aggregate(cbind(PC1, PC2) ~ Population,
                            data = pca_sub_df,
                            mean)
@@ -123,7 +125,7 @@ centroids_pop <- merge(centroids_pop,
                        unique(fam2[, c("Population", "Super.Population")]),
                        by = "Population")
 
-# ----- PLOT CENTROIDS COLORED BY SUPERPOP -----
+# PLOT CENTROIDS COLORED BY SUPERPOP
 cols <- ifelse(centroids_pop$Super.Population == "AFR", "black", "red")
 
 plot(centroids_pop$PC1, centroids_pop$PC2,
@@ -138,7 +140,7 @@ text(centroids_pop$PC1, centroids_pop$PC2,
 legend("topright", legend = c("AFR", "EAS"),
        col = c("black", "red"), pch = 19)
 
-# ----- MOST SEPARATED AFR vs EAS POPULATION PAIR (centroid distance) -----
+# MOST SEPARATED AFR vs EAS POPULATION PAIR (centroid distance) 
 afr_cent <- subset(centroids_pop, Super.Population == "AFR")
 eas_cent <- subset(centroids_pop, Super.Population == "EAS")
 
@@ -166,8 +168,129 @@ cat("Distance =", max(dist_matrix), "\n")
 
 
 
+2. Allele Frequency Heatmaps
+```{r}
+# CYP2D6 region (slightly padded)
+start_bp <- 42100000
+end_bp   <- 42250000
 
-# Bootstrap Resampling for Cluster Stability (ARI)
+ind.cyp <- which(map$chromosome == 22 &
+                 map$physical.pos >= start_bp &
+                 map$physical.pos <= end_bp)
+length(ind.cyp)
+
+maf <- bigsnpr::snp_MAF(G, ind.col = ind.cyp)
+# keep informative SNPs
+ind.cyp2 <- ind.cyp[maf >= 0.05 & maf <= 0.95]
+cat("SNPs retained:", length(ind.cyp2), "\n")
+```
+
+```{r}
+# extract genotype submatrix
+X <- as.matrix(G[, ind.cyp2])
+
+# add population labels
+pop_labels <- fam2$Super.Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+unique(pop_labels)
+```
+
+# 2a. Allele Frequency Heatmap (Superpopulations)
+```{r}
+# compute allele frequency per superpopulation
+pop_levels <- unique(pop_labels)
+
+af_matrix <- matrix(NA,
+                    nrow = length(pop_levels),
+                    ncol = ncol(X))
+
+rownames(af_matrix) <- pop_levels
+colnames(af_matrix) <- paste0("SNP_", 1:ncol(X))
+
+for (p in pop_levels) {
+  inds <- which(pop_labels == p)
+  af_matrix[p, ] <- colMeans(X[inds, ], na.rm = TRUE) / 2
+}
+```
+Heatmap (all Superpopulations)
+```{r}
+#install.packages("pheatmap")
+library(pheatmap)
+
+pheatmap(af_matrix,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency Heatmap\nSuperpopulations")
+```
+Heatmap (AFR & EAS only)
+```{r}
+library(pheatmap)
+
+# Subset matrix to AFR and EAS
+af_matrix_subset <- af_matrix[c("AFR", "EAS"), ]
+
+# Plot heatmap
+pheatmap(af_matrix_subset,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency Heatmap\nAFR vs EAS")
+```
+
+# 2b. Allele Frequency Heatmap (Subpopulations of AFR & EAS)
+```{r}
+# Subpopulation labels 
+pop_sub <- fam2$Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+super_sub <- fam2$Super.Population[
+  match(fam$sample.ID, fam2$sample.ID)
+]
+
+# keep AFR + EAS individuals
+keep_inds <- which(super_sub %in% c("AFR", "EAS"))
+
+X_sub <- as.matrix(G[keep_inds, ind.cyp2])
+
+pop_sub_keep <- pop_sub[keep_inds]
+```
+
+```{r}
+subpops <- unique(pop_sub_keep)
+
+af_matrix <- matrix(NA,
+                    nrow = length(subpops),
+                    ncol = ncol(X_sub))
+
+rownames(af_matrix) <- subpops
+colnames(af_matrix) <- paste0("SNP_", 1:ncol(X_sub))
+
+for (p in subpops) {
+  inds <- which(pop_sub_keep == p)
+  af_matrix[p, ] <- colMeans(X_sub[inds, ], na.rm = TRUE) / 2
+}
+
+var_keep <- apply(af_matrix, 2, var) > 0.001
+af_matrix <- af_matrix[, var_keep]
+```
+Heatmap
+```{r}
+library(pheatmap)
+pheatmap(af_matrix,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         #show_colnames = FALSE, #SNPs
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency\nAFR vs EAS Subpopulations")
+```
+
+
+
+
+3. Bootstrap Resampling for Cluster Stability (ARI)
 Each bootstrap: Resample individuals → Recompute PCA → Recluster → Compare with truth
 Then we compute: CI95% = [Q25%, Q75%]
 ```{r}
@@ -177,7 +300,7 @@ set.seed(123)
 B <- 1000   # use 10000 for final submission
 n <- length(ind_rows)
 
-# ----- ORIGINAL PCA + CLUSTERING -----
+# ORIGINAL PCA + CLUSTERING
 X_orig <- as.matrix(G[ind_rows, ind.locus2])
 keep <- apply(X_orig, 2, var) > 0
 X_orig <- X_orig[, keep, drop = FALSE]
@@ -202,9 +325,8 @@ true_labels_num <- as.numeric(factor(true_labels))
 ari_original <- adjustedRandIndex(orig_clusters, true_labels_num)
 cat("Original ARI:", ari_original, "\n")
 ```
-BOOTSTRAP
+Bootstrap
 ```{r}
-# ----- BOOTSTRAP -----
 ari_vals <- numeric(B)
 for (b in 1:B) {
   # resample individuals with replacement
@@ -227,16 +349,15 @@ for (b in 1:B) {
   ari_vals[b] <- adjustedRandIndex(boot_clusters, boot_true)
 }
 ```
-
+Summary Statistics
 ```{r}
-# ----- SUMMARY STATISTICS -----
 mean_ari <- mean(ari_vals)
 ci <- quantile(ari_vals, c(0.025, 0.975))
 
 cat("Bootstrap Mean ARI:", mean_ari, "\n")
 cat("95% CI:", ci[1], "-", ci[2], "\n")
 
-# ----- PLOT DISTRIBUTION -----
+# Plot Distribution
 hist(ari_vals, breaks = 40,
      main = "Bootstrap Distribution of ARI (AFR vs EAS)",
      xlab = "Adjusted Rand Index",
@@ -247,6 +368,188 @@ abline(v = mean_ari, col = "darkblue", lwd = 2)
 ```
 
 
+
+
+BONUS: UMAP
+```{r}
+library(uwot)
+
+set.seed(123)
+
+# Use same scaled genotype matrix from PCA
+umap_res <- umap(
+  X,
+  n_neighbors = 15,
+  min_dist = 0.1,
+  metric = "euclidean"
+)
+
+umap_df <- data.frame(
+  sample.ID = fam$sample.ID,
+  UMAP1 = umap_res[,1],
+  UMAP2 = umap_res[,2],
+  stringsAsFactors = FALSE
+)
+
+umap_df <- merge(umap_df, fam2, by = "sample.ID")
+```
+
+```{r}
+sp <- factor(umap_df$Super.Population)
+
+plot(umap_df$UMAP1, umap_df$UMAP2,
+     col = sp,
+     pch = 19,
+     xlab = "UMAP1",
+     ylab = "UMAP2",
+     main = "UMAP of CYP2D6 Region (1000 Genomes Superpopulations)")
+
+legend("topright",
+       legend = levels(sp),
+       col = seq_along(levels(sp)),
+       pch = 19)
+```
+
+
+
+
+4. CNV Analysis
+--> see if CYP2D6 functional difference matches the genetic separation.
+```{r}
+library(vcfR)
+vcf <- read.vcfR("1000G_SV/CYP2D6_SV.vcf.gz")
+head(vcf@fix)
+```
+
+```{r}
+var_rows <- which(apply(gt, 1, function(x) length(unique(x)) > 1))
+gt_var <- gt[var_rows, ]
+
+cnv_numeric <- apply(gt_var, 2, function(x) {
+  mean(ifelse(x == "0|0", 2,
+       ifelse(x %in% c("0|1","1|0"), 3,
+       ifelse(x == "1|1", 4, NA))), na.rm = TRUE)
+})
+
+cnv_df <- data.frame(
+  sample.ID = colnames(gt),
+  copy_number = cnv_numeric
+)
+
+cnv_df <- merge(cnv_df, fam2, by = "sample.ID")
+
+cnv_focus <- cnv_df %>%
+  dplyr::filter(Population %in% c("ESN", "CDX"))
+```
+
+```{r}
+cnv_summary <- cnv_df %>%
+  filter(Super.Population %in% c("AFR","EAS")) %>%
+  group_by(Population, Super.Population) %>%
+  summarise(
+    mean_CN = mean(copy_number),
+    sd_CN = sd(copy_number),
+    .groups="drop"
+  )
+
+ggplot(cnv_summary,
+       aes(x = Population, y = mean_CN, color = Super.Population)) +
+  geom_point(size = 4) +
+  geom_errorbar(aes(ymin = mean_CN - sd_CN,
+                    ymax = mean_CN + sd_CN),
+                width = 0.2) +
+  theme_minimal() +
+  labs(
+    title = "Mean CYP2D6 Copy Number by Population",
+    y = "Mean Copy Number"
+  )
+```
+
+
+
+
+
+BONUS: Causual Inference
+1. Instrument (IV): CYP2D6 genotype (0/1/2 alleles).
+2. Exposure: CYP2D6 activity (or CYP2D6 genotype coded numerically).
+3. Outcome: PK measurement (DV, drug concentration at time points).
+Run Mendelian Randomization (MR) to estimate the causal effect of CYP2D6 variation on PK outcomes.
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Load PK datasets 
+nigerian <- read.csv("synthetic_nigerian_popPK.csv")
+chinese  <- read.csv("synthetic_chinese_popPK.csv")
+
+nigerian$POP <- "Nigerian"
+chinese$POP  <- "Chinese"
+
+pk_data <- bind_rows(nigerian, chinese)
+
+# Compute PK summary per individual (AUC via trapezoidal rule)
+pk_summary <- pk_data %>%
+  group_by(ID, POP) %>%
+  arrange(TIME) %>%
+  summarise(
+    AUC = sum(diff(TIME) * (head(DV,-1) + tail(DV,-1)) / 2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Assign CYP2D6 activity levels 
+# 0 = poor metabolizer
+# 1 = intermediate
+# 2 = normal / ultrarapid
+
+set.seed(123)
+
+pk_summary$CYP2D6_activity <- sample(
+  0:2,
+  size = nrow(pk_summary),
+  replace = TRUE
+)
+
+# Check distribution
+table(pk_summary$CYP2D6_activity)
+
+# Mendelian Randomization Model
+# CYP2D6 activity (instrument) → PK outcome (AUC)
+# Adjust for population
+mr_model <- lm(AUC ~ CYP2D6_activity + POP, data = pk_summary)
+
+summary(mr_model)
+
+# 5. Extract causal estimate
+beta <- coef(mr_model)["CYP2D6_activity"]
+
+se <- summary(mr_model)$coefficients["CYP2D6_activity","Std. Error"]
+
+ci_lower <- beta - 1.96 * se
+ci_upper <- beta + 1.96 * se
+
+cat("Causal effect estimate (CYP2D6 activity -> AUC):", beta, "\n")
+cat("95% CI:", ci_lower, "-", ci_upper, "\n")
+
+# Create MR results dataframe
+mr_results <- data.frame(
+  Instrument = "CYP2D6 activity",
+  Estimate = beta,
+  SE = se,
+  CI_low = ci_lower,
+  CI_high = ci_upper
+)
+
+# 7. Plot causal effect estimate
+ggplot(mr_results, aes(x = Instrument, y = Estimate)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = CI_low, ymax = CI_high),
+    width = 0.2
+  ) +
+  theme_minimal() +
+  ylab("Causal Effect on AUC") +
+  ggtitle("Mendelian Randomization: CYP2D6 Activity → Alcohol Exposure (AUC)")
+```
 
 
 

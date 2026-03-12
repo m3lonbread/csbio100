@@ -5,7 +5,6 @@ date: "2026-02-20"
 ---
 
 allele frequency heatmap
-
 ```{r}
 # CYP2D6 region (slightly padded)
 start_bp <- 42100000
@@ -69,6 +68,21 @@ pheatmap(af_matrix,
 ```
 
 
+```{r}
+library(pheatmap)
+
+# Subset matrix to AFR and EAS
+af_matrix_subset <- af_matrix[c("AFR", "EAS"), ]
+
+# Plot heatmap
+pheatmap(af_matrix_subset,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency Heatmap\nAFR vs EAS")
+```
+
+
 
 Average frequency of non-reference (variant) alleles across CYP2D6 SNPs within each superpopulation.
 --> How genetically different populations are at the CYP2D6 locus.
@@ -117,7 +131,7 @@ super_sub <- fam2$Super.Population[
 # keep AFR + EAS individuals
 keep_inds <- which(super_sub %in% c("AFR", "EAS"))
 
-X_sub <- as.matrix(G[keep_inds, ind.cyp])
+X_sub <- as.matrix(G[keep_inds, ind.cyp2])
 
 pop_sub_keep <- pop_sub[keep_inds]
 ```
@@ -188,7 +202,37 @@ pheatmap(af_matrix_pair_all,
 ```
 
 
+Top 20 SNPs by Allele Frequence Difference: 
+Subpopulations 
+```{r}
+# Step 1: columns of af_matrix_pair correspond to which columns of af_matrix
+# af_matrix_pair <- af_matrix[c("ESN","CDX"), var_keep]
+var_keep_cols <- which(var_keep)  # positions in ind.cyp2
 
+# Step 2: top 20 SNPs by ESN vs CDX diff (relative to af_matrix_pair)
+top20_sub <- order(snp_diff_sub, decreasing = TRUE)[1:20]
+
+# Step 3: map back to ind.cyp2
+top20_ind_cyp2 <- ind.cyp2[var_keep_cols[top20_sub]]
+
+# Step 4: map back to map for SNP_ID and Position
+snp_ids_top20 <- map$marker.ID[top20_ind_cyp2]
+snp_positions_top20 <- map$physical.pos[top20_ind_cyp2]
+
+# Step 5: Build table
+top20_snps_table <- data.frame(
+  SNP_index = top20_sub,
+  SNP_ID = snp_ids_top20,
+  Position = snp_positions_top20,
+  ESN_vs_CDX_diff = snp_diff_sub[top20_sub]
+)
+
+top20_snps_table
+```
+
+
+
+Overlap: Super vs. Sub populations
 ```{r}
 # AFR vs EAS
 keep_inds_super <- which(super_sub %in% c("AFR", "EAS"))
@@ -229,19 +273,26 @@ data.frame(
 ```
 
 ```{r}
-# Get physical positions of overlapping SNPs
+# Overlapping SNP indices from your analysis
 overlap_inds <- c(27, 35, 38, 32, 44, 21, 6, 46, 45)
-snp_positions <- map$physical.pos[ind.cyp2][overlap_inds]
-snp_ids <- map$SNP[ind.cyp2][overlap_inds]  # if you have rsIDs
 
-data.frame(
+# SNP IDs and positions
+snp_ids <- map$marker.ID[ind.cyp2][overlap_inds]
+snp_positions <- map$physical.pos[ind.cyp2][overlap_inds]
+
+# Build table
+overlap_snps_table <- data.frame(
   SNP_index = overlap_inds,
   SNP_ID = snp_ids,
   Position = snp_positions,
   AFR_vs_EAS_diff = snp_diff_super[overlap_inds],
   ESN_vs_CDX_diff = snp_diff_sub[overlap_inds]
 )
+
+overlap_snps_table
 ```
+
+
 
 
 
