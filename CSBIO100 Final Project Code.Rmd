@@ -39,9 +39,11 @@ stopifnot(all(c("sample.ID","Population","Super.Population") %in% names(fam2)))
 1. PCA 
 # 1a. PCA on Superpopulations
 --> identify most separated superpopulations
+CYP2D6 location (GRCh38): chr22:42126499–42130947
+chr22:42126499–42130947
 ```{r}
-start_bp <- 41500000
-end_bp   <- 43500000
+start_bp <- 41600000
+end_bp   <- 43300000
 
 # SNP SUBSET (locus window) 
 ind.locus <- which(map$chromosome == 22 &
@@ -171,8 +173,8 @@ cat("Distance =", max(dist_matrix), "\n")
 2. Allele Frequency Heatmaps
 ```{r}
 # CYP2D6 region (slightly padded)
-start_bp <- 42100000
-end_bp   <- 42250000
+start_bp <- 41500000
+end_bp   <- 43500000
 
 ind.cyp <- which(map$chromosome == 22 &
                  map$physical.pos >= start_bp &
@@ -193,7 +195,6 @@ X <- as.matrix(G[, ind.cyp2])
 pop_labels <- fam2$Super.Population[
   match(fam$sample.ID, fam2$sample.ID)
 ]
-unique(pop_labels)
 ```
 
 # 2a. Allele Frequency Heatmap (Superpopulations)
@@ -224,6 +225,28 @@ pheatmap(af_matrix,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency Heatmap\nSuperpopulations")
 ```
+```{r}
+# pairwise population differences
+pop_diff <- matrix(0, nrow = nrow(af_matrix), ncol = nrow(af_matrix))
+rownames(pop_diff) <- rownames(af_matrix)
+colnames(pop_diff) <- rownames(af_matrix)
+
+for(i in 1:nrow(af_matrix)){
+  for(j in 1:nrow(af_matrix)){
+    pop_diff[i,j] <- mean(abs(af_matrix[i,] - af_matrix[j,]), na.rm = TRUE)
+  }
+}
+
+pop_diff
+
+pop_pairs <- as.data.frame(as.table(pop_diff))
+pop_pairs <- pop_pairs[pop_pairs$Var1 != pop_pairs$Var2, ]
+pop_pairs <- pop_pairs[!duplicated(t(apply(pop_pairs[,1:2], 1, sort))), ]
+# sort by difference
+pop_pairs <- pop_pairs[order(-pop_pairs$Freq), ]
+pop_pairs[1, ]
+```
+
 Heatmap (AFR & EAS only)
 ```{r}
 library(pheatmap)
@@ -240,53 +263,83 @@ pheatmap(af_matrix_subset,
 ```
 
 # 2b. Allele Frequency Heatmap (Subpopulations of AFR & EAS)
+Extract AFR + EAS individuals
 ```{r}
-# Subpopulation labels 
+# Subpopulation labels
 pop_sub <- fam2$Population[
   match(fam$sample.ID, fam2$sample.ID)
 ]
 
-super_sub <- fam2$Super.Population[
+super_pop <- fam2$Super.Population[
   match(fam$sample.ID, fam2$sample.ID)
 ]
 
 # keep AFR + EAS individuals
-keep_inds <- which(super_sub %in% c("AFR", "EAS"))
+keep_inds_sub <- which(super_pop %in% c("AFR", "EAS"))
 
-X_sub <- as.matrix(G[keep_inds, ind.cyp2])
+X_sub <- as.matrix(G[keep_inds_sub, ind.cyp2])
 
-pop_sub_keep <- pop_sub[keep_inds]
+pop_sub_keep <- pop_sub[keep_inds_sub]
 ```
-
+Compute allele frequency matrix
 ```{r}
-subpops <- unique(pop_sub_keep)
+subpop_levels <- unique(pop_sub_keep)
 
-af_matrix <- matrix(NA,
-                    nrow = length(subpops),
-                    ncol = ncol(X_sub))
+af_matrix_sub <- matrix(NA,
+                        nrow = length(subpop_levels),
+                        ncol = ncol(X_sub))
 
-rownames(af_matrix) <- subpops
-colnames(af_matrix) <- paste0("SNP_", 1:ncol(X_sub))
+rownames(af_matrix_sub) <- subpop_levels
+colnames(af_matrix_sub) <- paste0("SNP_", 1:ncol(X_sub))
 
-for (p in subpops) {
+for (p in subpop_levels) {
   inds <- which(pop_sub_keep == p)
-  af_matrix[p, ] <- colMeans(X_sub[inds, ], na.rm = TRUE) / 2
+  af_matrix_sub[p, ] <- colMeans(X_sub[inds, ], na.rm = TRUE) / 2
 }
 
-var_keep <- apply(af_matrix, 2, var) > 0.001
-af_matrix <- af_matrix[, var_keep]
+# remove low-variance SNPs
+var_keep_sub <- apply(af_matrix_sub, 2, var) > 0.001
+af_matrix_sub <- af_matrix_sub[, var_keep_sub]
 ```
 Heatmap
 ```{r}
 library(pheatmap)
-pheatmap(af_matrix,
+
+pheatmap(af_matrix_sub,
          cluster_rows = TRUE,
          cluster_cols = TRUE,
-         #show_colnames = FALSE, #SNPs
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency\nAFR vs EAS Subpopulations")
 ```
 
+```{r}
+# pairwise differences for subpopulations
+pop_diff_sub <- matrix(0,
+                       nrow = nrow(af_matrix_sub),
+                       ncol = nrow(af_matrix_sub))
+
+rownames(pop_diff_sub) <- rownames(af_matrix_sub)
+colnames(pop_diff_sub) <- rownames(af_matrix_sub)
+
+for(i in 1:nrow(af_matrix_sub)){
+  for(j in 1:nrow(af_matrix_sub)){
+    pop_diff_sub[i,j] <- mean(abs(af_matrix_sub[i,] - af_matrix_sub[j,]), na.rm = TRUE)
+  }
+}
+
+pop_pairs_sub <- as.data.frame(as.table(pop_diff_sub))
+
+# remove self comparisons
+pop_pairs_sub <- pop_pairs_sub[pop_pairs_sub$Var1 != pop_pairs_sub$Var2, ]
+
+# remove duplicate pairs (A-B vs B-A)
+pop_pairs_sub <- pop_pairs_sub[!duplicated(t(apply(pop_pairs_sub[,1:2],1,sort))), ]
+
+# sort by largest difference
+pop_pairs_sub <- pop_pairs_sub[order(-pop_pairs_sub$Freq), ]
+
+print(pop_pairs_sub, row.names = FALSE)
+```
 
 
 
@@ -413,8 +466,24 @@ legend("topright",
 
 
 
-4. CNV Analysis
+4. CYP2D6 Copy Number Variation (CNV) Analysis
 --> see if CYP2D6 functional difference matches the genetic separation.
+```{bash}
+# Download 1000 Genomes SV dataset (which includes CNV info)
+curl -O ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/integrated_sv_map/ALL.wgs.mergedSV.v8.20130502.svs.genotypes.vcf.gz
+curl -O ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/integrated_sv_map/ALL.wgs.mergedSV.v8.20130502.svs.genotypes.vcf.gz.tbi
+
+# Extract CYP2D6 region
+bcftools view \
+-r 22:41500000-43500000 \
+ALL.wgs.mergedSV.v8.20130502.svs.genotypes.vcf.gz \
+-Oz -o CYP2D6_SV.vcf.gz
+
+# index output
+bcftools index CYP2D6_SV.vcf.gz
+```
+
+
 ```{r}
 library(vcfR)
 vcf <- read.vcfR("1000G_SV/CYP2D6_SV.vcf.gz")
