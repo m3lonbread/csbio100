@@ -79,15 +79,14 @@ pca2_df <- merge(pca2_df, fam2, by = "sample.ID", all.x = TRUE)
 
 #  PLOT (colored by superpop) 
 sp <- factor(pca2_df$Super.Population)
-
 plot(pca2_df$PC1, pca2_df$PC2,
      col = sp, pch = 19,
      xlab = "PC1", ylab = "PC2",
-     main = paste0("chr22:", start_bp, "-", end_bp, " (CYP2D6 locus region)"))
-
+     main = paste0("PCA of CYP2D6 Locus Region"))
 legend("topright", legend = levels(sp),
        col = seq_along(levels(sp)), pch = 19, cex = 0.8)
 ```
+
 
 # 1b. PCA on Subpopulations (AFR and EAS) 
 --> identify most separated subpopulations
@@ -166,16 +165,13 @@ eas_pop <- colnames(dist_matrix)[max_idx[2]]
 cat("Most separated AFR–EAS pair:", afr_pop, "vs", eas_pop, "\n")
 cat("Distance =", max(dist_matrix), "\n")
 
+
 ```
 
 
 
 2. Allele Frequency Heatmaps
 ```{r}
-# CYP2D6 region (slightly padded)
-start_bp <- 41500000
-end_bp   <- 43500000
-
 ind.cyp <- which(map$chromosome == 22 &
                  map$physical.pos >= start_bp &
                  map$physical.pos <= end_bp)
@@ -214,7 +210,7 @@ for (p in pop_levels) {
   af_matrix[p, ] <- colMeans(X[inds, ], na.rm = TRUE) / 2
 }
 ```
-Heatmap (all Superpopulations)
+Heatmap (all superpopulations)
 ```{r}
 #install.packages("pheatmap")
 library(pheatmap)
@@ -225,6 +221,7 @@ pheatmap(af_matrix,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency Heatmap\nSuperpopulations")
 ```
+Most Differentiated = AFR &	EAS
 ```{r}
 # pairwise population differences
 pop_diff <- matrix(0, nrow = nrow(af_matrix), ncol = nrow(af_matrix))
@@ -246,7 +243,6 @@ pop_pairs <- pop_pairs[!duplicated(t(apply(pop_pairs[,1:2], 1, sort))), ]
 pop_pairs <- pop_pairs[order(-pop_pairs$Freq), ]
 pop_pairs[1, ]
 ```
-
 Heatmap (AFR & EAS only)
 ```{r}
 library(pheatmap)
@@ -301,7 +297,7 @@ for (p in subpop_levels) {
 var_keep_sub <- apply(af_matrix_sub, 2, var) > 0.001
 af_matrix_sub <- af_matrix_sub[, var_keep_sub]
 ```
-Heatmap
+Heatmap (all subpopulations)
 ```{r}
 library(pheatmap)
 
@@ -311,7 +307,20 @@ pheatmap(af_matrix_sub,
          color = colorRampPalette(c("navy", "white", "firebrick"))(100),
          main = "CYP2D6 Allele Frequency\nAFR vs EAS Subpopulations")
 ```
+Heatmap (ESN & CDX only)
+```{r}
+# Subset allele frequency matrix to ESN and CDX only
+af_matrix_focus <- af_matrix_sub[rownames(af_matrix_sub) %in% c("ESN", "CDX"), ]
 
+# Plot heatmap
+pheatmap(af_matrix_focus,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("navy", "white", "firebrick"))(100),
+         main = "CYP2D6 Allele Frequency: ESN vs CDX")
+```
+
+Most Differentiated = ESN & CDX
 ```{r}
 # pairwise differences for subpopulations
 pop_diff_sub <- matrix(0,
@@ -337,8 +346,7 @@ pop_pairs_sub <- pop_pairs_sub[!duplicated(t(apply(pop_pairs_sub[,1:2],1,sort)))
 
 # sort by largest difference
 pop_pairs_sub <- pop_pairs_sub[order(-pop_pairs_sub$Freq), ]
-
-print(pop_pairs_sub, row.names = FALSE)
+pop_pairs_sub[1, ]
 ```
 
 
@@ -426,12 +434,11 @@ abline(v = mean_ari, col = "darkblue", lwd = 2)
 BONUS: UMAP
 ```{r}
 library(uwot)
-
 set.seed(123)
 
 # Use same scaled genotype matrix from PCA
 umap_res <- umap(
-  X,
+  X,s
   n_neighbors = 15,
   min_dist = 0.1,
   metric = "euclidean"
@@ -455,7 +462,7 @@ plot(umap_df$UMAP1, umap_df$UMAP2,
      pch = 19,
      xlab = "UMAP1",
      ylab = "UMAP2",
-     main = "UMAP of CYP2D6 Region (1000 Genomes Superpopulations)")
+     main = "UMAP of CYP2D6 Region (Superpopulations)")
 
 legend("topright",
        legend = levels(sp),
@@ -475,18 +482,18 @@ curl -O ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/integrated_sv_map/ALL.wg
 
 # Extract CYP2D6 region
 bcftools view \
--r 22:41500000-43500000 \
+-r 22:41600000-43300000 \
 ALL.wgs.mergedSV.v8.20130502.svs.genotypes.vcf.gz \
--Oz -o CYP2D6_SV.vcf.gz
+-Oz -o CYP2D6_SV2.vcf.gz
 
 # index output
-bcftools index CYP2D6_SV.vcf.gz
+bcftools index CYP2D6_SV2.vcf.gz
 ```
 
 
 ```{r}
 library(vcfR)
-vcf <- read.vcfR("1000G_SV/CYP2D6_SV.vcf.gz")
+vcf <- read.vcfR("CYP2D6_SV2.vcf.gz")
 head(vcf@fix)
 ```
 
@@ -534,91 +541,6 @@ ggplot(cnv_summary,
   )
 ```
 
-
-
-
-
-BONUS: Causual Inference
-1. Instrument (IV): CYP2D6 genotype (0/1/2 alleles).
-2. Exposure: CYP2D6 activity (or CYP2D6 genotype coded numerically).
-3. Outcome: PK measurement (DV, drug concentration at time points).
-Run Mendelian Randomization (MR) to estimate the causal effect of CYP2D6 variation on PK outcomes.
-```{r}
-library(dplyr)
-library(ggplot2)
-
-# Load PK datasets 
-nigerian <- read.csv("synthetic_nigerian_popPK.csv")
-chinese  <- read.csv("synthetic_chinese_popPK.csv")
-
-nigerian$POP <- "Nigerian"
-chinese$POP  <- "Chinese"
-
-pk_data <- bind_rows(nigerian, chinese)
-
-# Compute PK summary per individual (AUC via trapezoidal rule)
-pk_summary <- pk_data %>%
-  group_by(ID, POP) %>%
-  arrange(TIME) %>%
-  summarise(
-    AUC = sum(diff(TIME) * (head(DV,-1) + tail(DV,-1)) / 2, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# Assign CYP2D6 activity levels 
-# 0 = poor metabolizer
-# 1 = intermediate
-# 2 = normal / ultrarapid
-
-set.seed(123)
-
-pk_summary$CYP2D6_activity <- sample(
-  0:2,
-  size = nrow(pk_summary),
-  replace = TRUE
-)
-
-# Check distribution
-table(pk_summary$CYP2D6_activity)
-
-# Mendelian Randomization Model
-# CYP2D6 activity (instrument) → PK outcome (AUC)
-# Adjust for population
-mr_model <- lm(AUC ~ CYP2D6_activity + POP, data = pk_summary)
-
-summary(mr_model)
-
-# 5. Extract causal estimate
-beta <- coef(mr_model)["CYP2D6_activity"]
-
-se <- summary(mr_model)$coefficients["CYP2D6_activity","Std. Error"]
-
-ci_lower <- beta - 1.96 * se
-ci_upper <- beta + 1.96 * se
-
-cat("Causal effect estimate (CYP2D6 activity -> AUC):", beta, "\n")
-cat("95% CI:", ci_lower, "-", ci_upper, "\n")
-
-# Create MR results dataframe
-mr_results <- data.frame(
-  Instrument = "CYP2D6 activity",
-  Estimate = beta,
-  SE = se,
-  CI_low = ci_lower,
-  CI_high = ci_upper
-)
-
-# 7. Plot causal effect estimate
-ggplot(mr_results, aes(x = Instrument, y = Estimate)) +
-  geom_point(size = 4) +
-  geom_errorbar(
-    aes(ymin = CI_low, ymax = CI_high),
-    width = 0.2
-  ) +
-  theme_minimal() +
-  ylab("Causal Effect on AUC") +
-  ggtitle("Mendelian Randomization: CYP2D6 Activity → Alcohol Exposure (AUC)")
-```
 
 
 
