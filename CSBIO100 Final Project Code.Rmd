@@ -491,13 +491,13 @@ bcftools index CYP2D6_SV2.vcf.gz
 ```
 
 
-```{r}
+```
 library(vcfR)
 vcf <- read.vcfR("CYP2D6_SV2.vcf.gz")
 head(vcf@fix)
 ```
 
-```{r}
+```
 var_rows <- which(apply(gt, 1, function(x) length(unique(x)) > 1))
 gt_var <- gt[var_rows, ]
 
@@ -518,7 +518,7 @@ cnv_focus <- cnv_df %>%
   dplyr::filter(Population %in% c("ESN", "CDX"))
 ```
 
-```{r}
+
 cnv_summary <- cnv_df %>%
   filter(Super.Population %in% c("AFR","EAS")) %>%
   group_by(Population, Super.Population) %>%
@@ -539,8 +539,661 @@ ggplot(cnv_summary,
     title = "Mean CYP2D6 Copy Number by Population",
     y = "Mean Copy Number"
   )
+
+# Generate synthetic datasets
+
+library(data.table)
+set.seed(1)
+
+# Study-level constants
+N      <- 150
+N_male <- 75
+N_fem  <- 75
+SEX    <- c(rep(1, N_male), rep(0, N_fem))
+
+WT <- numeric(N)
+WT[SEX==1] <- pmax(rnorm(sum(SEX==1), mean=71, sd=9.9), 40)
+WT[SEX==0] <- pmax(rnorm(sum(SEX==0), mean=50, sd=5.1), 35)
+
+p_meal   <- 0.68
+EMPTY    <- rbinom(N, size=1, prob=1 - p_meal)
+DOSE_GKG <- runif(N, min=0.5, max=0.7)
+D_g      <- DOSE_GKG * WT    # grams ethanol
+D_mg     <- D_g * 1000        # mg ethanol — KEY FIX
+
+# Yang 2011 parameters
+b1      <- 4.283
+b2      <- 2.100
+b3      <- -0.880
+b_wt    <- 0.015
+b_empty <- 0.194
+b_sex   <- -0.154
+
+Omega <- matrix(c(
+  0.209, 0.000, 0.173,
+  0.000, 0.409, 0.000,
+  0.173, 0.000, 0.192
+), nrow=3, byrow=TRUE)
+
+L   <- chol(Omega)
+Z   <- matrix(rnorm(N*3), ncol=3)
+ETA <- Z %*% L
+eta1 <- ETA[,1]
+eta2 <- ETA[,2]
+eta3 <- ETA[,3]
+
+# Cl in dL/hr — with D in mg -> cp in mg/100mL
+Cl  <- exp(b1 + b_wt * WT + eta1)
+ka  <- exp(b2 + b_empty * EMPTY + eta2)
+kel <- exp(b3 + b_sex * SEX + eta3)
+
+# Sampling times
+t_early <- seq(0.17, 1.0, by=0.17)
+t_late  <- seq(1.5, 6.0, by=0.5)   # extended to 6hr to match Nigerian
+times   <- c(0, t_early, t_late)
+
+# Concentration function
+#    D in mg, Cl in dL/hr -> cp in mg/100mL
+Ct_fun <- function(t, D, Cl, ka, kel){
+  if (abs(ka - kel) < 1e-6) return(rep(0, length(t)))
+  D * ka * kel / (Cl * (ka - kel)) * (exp(-kel*t) - exp(-ka*t))
+}
+
+# Residual error on mg/100mL scale
+sigma_mg <- sqrt(11.46)   # ~3.38 mg/100mL (Yang et al.)
+LLOQ     <- 0.2           # mg/100mL
+
+# Build dataset
+out <- rbindlist(lapply(1:N, function(i){
+  conc <- sapply(times, Ct_fun, D=D_mg[i], Cl=Cl[i], ka=ka[i], kel=kel[i])
+  dv   <- pmax(conc + rnorm(length(times), 0, sigma_mg), 0)
+  dv[dv < LLOQ] <- 0
+  data.table(
+    ID       = i,
+    TIME     = times,
+    DV       = dv,         # mg/100mL
+    SEX      = SEX[i],
+    WT       = WT[i],
+    EMPTY    = EMPTY[i],
+    DOSE_GKG = DOSE_GKG[i]
+  )
+}))
+
+out[, `:=`(AMT=0, EVID=0, CMT=1)]
+out[TIME==0, `:=`(AMT = D_mg[ID], EVID=1, DV=NA_real_)]  # AMT in mg
+
+# verify
+cat("AMT range (mg):       ", round(range(out[EVID==1, AMT])), "\n")
+cat("DV range (mg/100mL):  ", round(range(out[EVID==0 & DV>0, DV]), 1), "\n")
+
+fwrite(out, "synthetic_chinese_popPK.csv")
+out[]
+```
+
+library(data.table)
+set.seed(3)
+
+# Study-level constants
+N      <- 150
+N_male <- 75
+SEX    <- c(rep(1, N_male), rep(0, N - N_male))  # 1=male, 0=female
+WT     <- pmax(rnorm(N, mean=55, sd=3), 40)
+
+p_meal   <- 0.68
+EMPTY    <- rbinom(N, size=1, prob = 1 - p_meal)  # 1=empty stomach
+DOSE_GKG <- runif(N, min=0.5, max=0.7)
+D_g      <- DOSE_GKG * WT     # grams ethanol
+D_mg     <- D_g * 1000         # mg ethanol
+
+#  Individual blood volume via Widmark r factor
+r_widmark    <- ifelse(SEX == 1, 0.68, 0.55)  # L/kg
+blood_vol_dL <- r_widmark * WT * 10            # dL (100 mL units)
+
+# Ct model
+#    Units: D in mg, Cl in dL/hr -> conc in mg/100mL
+
+Ct_fun <- function(t, D, Cl, ka, kel){
+  if (abs(ka - kel) < 1e-6) return(rep(0, length(t)))
+  D * ka * kel / (Cl * (ka - kel)) * (exp(-kel*t) - exp(-ka*t))
+}
+
+# Helper functions
+rtnorm_pos <- function(n, mean, sd, min = 1e-6){
+  x <- rnorm(n, mean, sd)
+  while(any(x <= min)){
+    x[x <= min] <- rnorm(sum(x <= min), mean, sd)
+  }
+  x
+}
+
+solve_ka <- function(kel, tmax){
+  f <- function(ka) log(ka / kel) / (ka - kel) - tmax
+  uniroot(f, lower = kel + 1e-4, upper = 200)$root
+}
+
+solve_cl_from_cmax <- function(D, ka, kel, tmax, cmax){
+  num <- D * ka * kel / (ka - kel) * (exp(-kel * tmax) - exp(-ka * tmax))
+  Cl  <- num / cmax
+  if (!is.finite(Cl) || Cl <= 0) NA_real_ else Cl
+}
+
+# PK targets — adjusted for fast Nigerian clearance
+# Lower Cmax + faster kel -> higher Cl -> faster clearance
+cmax_m_mean <- 70;   cmax_m_sd <- 4     # mg/100mL (reduced from 90)
+cmax_f_mean <- 75;   cmax_f_sd <- 5     # mg/100mL (reduced from 96)
+
+tmax_m_mean <- 0.60; tmax_m_sd <- 0.12  # hrs (faster than SC)
+tmax_f_mean <- 0.45; tmax_f_sd <- 0.10
+
+kel_m_mean  <- 0.35; kel_m_sd  <- 0.04  # /hr (half-life ~2 hr)
+kel_f_mean  <- 0.40; kel_f_sd  <- 0.04  # /hr (half-life ~1.7 hr)
+
+#  Generate individual PK parameters
+kel  <- numeric(N)
+tmax <- numeric(N)
+cmax <- numeric(N)
+
+kel[SEX==1]  <- rtnorm_pos(sum(SEX==1), kel_m_mean, kel_m_sd)
+kel[SEX==0]  <- rtnorm_pos(sum(SEX==0), kel_f_mean, kel_f_sd)
+tmax[SEX==1] <- rtnorm_pos(sum(SEX==1), tmax_m_mean, tmax_m_sd, min=0.05)
+tmax[SEX==0] <- rtnorm_pos(sum(SEX==0), tmax_f_mean, tmax_f_sd, min=0.05)
+cmax[SEX==1] <- rtnorm_pos(sum(SEX==1), cmax_m_mean, cmax_m_sd)
+cmax[SEX==0] <- rtnorm_pos(sum(SEX==0), cmax_f_mean, cmax_f_sd)
+
+ka <- mapply(solve_ka, kel=kel, tmax=tmax)
+Cl <- mapply(function(D, ka, kel, tmax, cmax){
+  solve_cl_from_cmax(D, ka, kel, tmax, cmax)
+}, D=D_mg, ka=ka, kel=kel, tmax=tmax, cmax=cmax)
+
+# sanity check
+cat("Cl range (dL/hr):          ", round(range(Cl), 1), "\n")
+cat("kel range (/hr):           ", round(range(kel), 3), "\n")
+cat("Implied half-life range (hr):", round(range(log(2)/kel), 2), "\n")
+cat("ka range (/hr):            ", round(range(ka), 2), "\n")
+
+stopifnot(all(is.finite(Cl)), all(Cl > 0))
+
+# Sampling times
+t_early <- seq(0.17, 1.0, by=0.17)
+t_late  <- seq(1.5, 6.0, by=0.5)
+times   <- c(0, t_early, t_late)
+
+# Residual error (mg/100mL scale)
+sigma_mg <- sqrt(11.46)  # ~3.38 mg/100mL (Yang et al.)
+cv       <- 0.05         # 5% proportional
+LLOQ     <- 0.2          # mg/100mL
+
+# Build dataset
+out <- rbindlist(lapply(1:N, function(i){
+  conc <- sapply(times, Ct_fun, D=D_mg[i], Cl=Cl[i], ka=ka[i], kel=kel[i])
+  dv   <- conc * (1 + rnorm(length(times), 0, cv)) + rnorm(length(times), 0, sigma_mg)
+  dv   <- pmax(dv, 0)
+  dv[dv < LLOQ] <- 0
+  data.table(
+    ID           = i,
+    TIME         = times,
+    DV           = dv,
+    SEX          = SEX[i],
+    WT           = WT[i],
+    EMPTY        = EMPTY[i],
+    DOSE_GKG     = DOSE_GKG[i],
+    BLOOD_VOL_dL = blood_vol_dL[i]
+  )
+}))
+
+out[, `:=`(AMT=0, EVID=0, CMT=1)]
+out[TIME==0, `:=`(AMT = D_mg[ID], EVID=1, DV=NA_real_)]
+
+# verify output looks right
+cat("\nAMT range (mg):        ", round(range(out[EVID==1, AMT])), "\n")
+cat("DV range (mg/100mL):   ", round(range(out[EVID==0 & DV>0, DV]), 1), "\n")
+
+fwrite(out, "synthetic_nigerian_popPK.csv")
+out[]
 ```
 
 
+```{r}
+library(data.table)
+library(ggplot2)
+
+# Shared model parameters (Yang 2011)
+b1 <- 4.283
+b2 <- 2.100
+b3 <- -0.880
+b_wt    <- 0.015
+b_empty <- 0.194
+b_sex   <- -0.154
+
+Omega <- matrix(c(
+  0.209, 0.000, 0.173,
+  0.000, 0.409, 0.000,
+  0.173, 0.000, 0.192
+), nrow=3, byrow=TRUE)
+
+L <- chol(Omega)
+
+Ct_fun <- function(t, D, Cl, ka, kel){
+  if (abs(ka - kel) < 1e-9) return(rep(0, length(t)))
+  D * ka * kel / (Cl * (ka - kel)) * (exp(-kel*t) - exp(-ka*t))
+}
+
+# smooth curve time grid
+times_smooth <- seq(0, 24, by = 0.02)
+
+# observed sampling time grid (like your dataset)
+t_early <- seq(0.17, 5.0, by=0.17)
+t_late  <- seq(5.0, 10.0 , by=0.5)
+times_obs <- c(0.17, t_early, t_late) # exclude 0 dose time for plotting
+
+# Simulator: now supports CL multipliers + kel multipliers
+simulate_conc_pop <- function(
+  N,
+  seed,
+  wt_fun,
+  dose_gkg_fun,
+  empty_fun,
+  cl_multiplier_fun,     
+  kel_multiplier_fun
+){
+  set.seed(seed)
+
+  N_male <- floor(N/2)
+  N_fem  <- N - N_male
+  SEX <- c(rep(1, N_male), rep(0, N_fem))
+
+  WT <- wt_fun(SEX)
+  DOSE_GKG <- dose_gkg_fun(N)
+  D_g <- DOSE_GKG * WT
+  EMPTY <- empty_fun(N)
+
+  Z <- matrix(rnorm(N*3), ncol=3)
+  ETA <- Z %*% L
+  eta1 <- ETA[,1]; eta2 <- ETA[,2]; eta3 <- ETA[,3]
+
+  Cl_base  <- exp(b1 + b_wt * WT + eta1)
+  ka       <- exp(b2 + b_empty * EMPTY + eta2)
+  kel_base <- exp(b3 + b_sex * SEX + eta3)
+
+  # apply population-level multipliers
+  Cl  <- Cl_base  * cl_multiplier_fun(SEX)
+  kel <- kel_base * kel_multiplier_fun(SEX)
+
+  conc_mat <- matrix(NA_real_, nrow = N, ncol = length(times_smooth))
+  for(i in 1:N){
+    conc_mat[i,] <- Ct_fun(times_smooth, D_g[i], Cl[i], ka[i], kel[i])
+  }
+
+  list(conc = conc_mat, SEX=SEX, WT=WT, DOSE_GKG=DOSE_GKG, EMPTY=EMPTY,
+       D_g=D_g, Cl=Cl, ka=ka, kel=kel)
+}
+
+# Population definitions
+wt_yang <- function(SEX){
+  N <- length(SEX)
+  WT <- numeric(N)
+  WT[SEX==1] <- pmax(rnorm(sum(SEX==1), mean=71, sd=9.9), 40)
+  WT[SEX==0] <- pmax(rnorm(sum(SEX==0), mean=50, sd=5.1), 35)
+  WT
+}
+
+wt_nig <- function(SEX){
+  N <- length(SEX)
+  pmax(rnorm(N, mean=55, sd=3), 40)
+}
+
+dose_like_original <- function(N) runif(N, min=0.5, max=0.7)
+
+empty_like_original <- function(N){
+  p_meal <- 0.68
+  rbinom(N, 1, prob = 1 - p_meal)
+}
+
+# Multipliers
+# Southern Chinese: baseline
+cl_mult_yang  <- function(SEX) rep(1, length(SEX))
+kel_mult_yang <- function(SEX) rep(1, length(SEX))
+
+# Nigerian: increase CL to reduce exposure WITHOUT spiky peak
+nigerian_cl_multiplier <- 2.3  # <-- tune: try 1.2 to 1.8
+cl_mult_nig <- function(SEX) rep(nigerian_cl_multiplier, length(SEX))
+
+# keep kel ~ same as baseline (optional female ratio)
+nigerian_kel_multiplier <- 1.0
+female_extra_multiplier <- 0.026/0.021
+kel_mult_nig <- function(SEX){
+  base <- rep(nigerian_kel_multiplier, length(SEX))
+  base[SEX==0] <- base[SEX==0] * female_extra_multiplier
+  base
+}
+
+# Simulate populations
+yang <- simulate_conc_pop(
+  N = 2000, seed = 1,
+  wt_fun = wt_yang,
+  dose_gkg_fun = dose_like_original,
+  empty_fun = empty_like_original,
+  cl_multiplier_fun = cl_mult_yang,
+  kel_multiplier_fun = kel_mult_yang
+)
+
+nig <- simulate_conc_pop(
+  N = 2000, seed = 2,
+  wt_fun = wt_nig,
+  dose_gkg_fun = dose_like_original,
+  empty_fun = empty_like_original,
+  cl_multiplier_fun = cl_mult_nig,
+  kel_multiplier_fun = kel_mult_nig
+)
+
+# Summarize smooth mean + 5-95% band
+
+summarize_profile <- function(conc_mat, label){
+  data.table(
+    time = times_smooth,
+    mean = colMeans(conc_mat),
+    p05  = apply(conc_mat, 2, quantile, probs=0.05),
+    p95  = apply(conc_mat, 2, quantile, probs=0.95),
+    pop  = label
+  )
+}
+
+prof <- rbind(
+  summarize_profile(yang$conc, "Southern Chinese"),
+  summarize_profile(nig$conc,  "Nigerian")
+)
+
+# Keep observed points (unchanged logic)
+
+make_obs5 <- function(sim, pop_label, seed=999, meas_sd=0.008){
+  set.seed(seed)
+  id <- sample(seq_along(sim$D_g), 1)
+
+  pred <- Ct_fun(times_obs, sim$D_g[id], sim$Cl[id], sim$ka[id], sim$kel[id])
+
+  idx <- sample(seq_along(times_obs), 5)
+  dt <- data.table(
+    time = times_obs[idx],
+    conc = pmax(pred[idx] + rnorm(5, 0, meas_sd), 0),
+    pop  = pop_label
+  )
+  dt[order(time)]
+}
+
+obs_ch5 <- make_obs5(yang, "Southern Chinese", seed=1001, meas_sd=0.008)
+obs_ng5 <- make_obs5(nig,  "Nigerian",        seed=1002, meas_sd=0.008)
+obs5 <- rbind(obs_ch5, obs_ng5)
+
+# Plot: smooth line + band + points
+p <- ggplot(prof, aes(x=time, y=mean, color=pop, fill=pop)) +
+  geom_ribbon(aes(ymin=p05, ymax=p95), alpha=0.15, color=NA) +
+  geom_line(linewidth=1.1) +
+  geom_point(
+    data = obs5,
+    aes(x=time, y=conc, shape=pop),
+    inherit.aes = FALSE,
+    color = "black",
+    size = 3
+  ) +
+  labs(x = "Time (h)", y = "BAC (mg/100 mL)") +
+  coord_cartesian(xlim=c(0, 12)) +
+  theme_minimal(base_size = 14) +
+  theme(legend.title = element_blank())
+
+p
+```
+
+
+
+library(data.table)
+library(nlme)
+library(ggplot2)
+
+# Closed-form 1cpt oral model
+cp_oral_1cpt <- function(time, dose, lcl, lka, lkel) {
+  cl  <- exp(lcl)
+  ka  <- exp(lka)
+  kel <- exp(lkel)
+  denom <- (ka - kel)
+
+  pred <- ifelse(abs(denom) < 1e-8,
+                 0,
+                 dose * ka * kel / (cl * denom) * (exp(-kel*time) - exp(-ka*time)))
+  # prevent log(0)
+  pmax(pred, 1e-12)
+}
+
+# log-pred wrapper (proportional error model on original scale)
+lpred_wrapper <- function(TIME, DOSE_G,
+                          lcl_0, lcl_wt,
+                          lka_0, lka_empty,
+                          lkel_0, lkel_sex,
+                          WTc, EMPTY, SEX) {
+  pred <- cp_oral_1cpt(
+    TIME, DOSE_G,
+    lcl  = lcl_0 + lcl_wt * WTc,
+    lka  = lka_0 + lka_empty * EMPTY,
+    lkel = lkel_0 + lkel_sex * SEX
+  )
+  log(pred)
+}
+
+ctrl <- nlmeControl(
+  pnlsTol = 1e-6, msTol = 1e-6,
+  maxIter = 300, pnlsMaxIter = 80, msMaxIter = 300,
+  returnObject = TRUE
+)
+# Load + prep
+load_pop <- function(path, label){
+  dt <- fread(path)
+  dt <- dt[EVID == 0 & !is.na(DV)]
+  dt[, POP := label]
+  dt[, ID := as.factor(ID)]
+  dt[, SEX := as.numeric(SEX)]
+  dt[, EMPTY := as.numeric(EMPTY)]
+  dt[, WT := as.numeric(WT)]
+  dt[, DOSE_G := DOSE_GKG * WT]
+  dt
+}
+
+# Fit one population robustly
+fit_one_pop <- function(dt, label, blq = c("drop0","replace0")) {
+  blq <- match.arg(blq)
+  cat("\n====================\n")
+  cat("Fitting population:", label, "\n")
+  cat("====================\n")
+
+  # Center WT within dataset
+  muWT <- mean(dt$WT, na.rm=TRUE)
+  dt[, WTc := WT - muWT]
+
+  # BLQ handling
+  prop0 <- mean(dt$DV == 0, na.rm=TRUE)
+  cat("Proportion DV==0:", round(prop0, 4), "\n")
+
+  dt2 <- copy(dt)
+  if(blq == "drop0"){
+    dt2 <- dt2[DV > 0]
+  } else {
+    # replace zeros with half of small positive reference (5th percentile of positives)
+    ref <- quantile(dt2$DV[dt2$DV > 0], probs=0.05, na.rm=TRUE)
+    dt2[DV == 0, DV := as.numeric(ref)/2]
+  }
+
+  # log DV
+  dt2[, LDV := log(DV)]
+
+  # Starting values:
+  # If WT is centered, intercept shifts by b_wt*mean(WT)
+  start <- c(
+    lcl_0     = 4.283 + 0.015 * muWT,
+    lcl_wt    = 0.015,
+    lka_0     = 2.100,
+    lka_empty = 0.194,
+    lkel_0    = -0.880,
+    lkel_sex  = -0.154
+  )
+
+  fixed_names <- names(start)
+
+  cat("Step 0: gnls fixed-only...\n")
+  fit0 <- gnls(
+    LDV ~ lpred_wrapper(TIME, DOSE_G,
+                        lcl_0, lcl_wt,
+                        lka_0, lka_empty,
+                        lkel_0, lkel_sex,
+                        WTc, EMPTY, SEX),
+    data = dt2,
+    start = start,
+    control = ctrl
+  )
+  cat("gnls OK. logLik:", logLik(fit0), "\n")
+
+  # ---- Step 1: nlme random CL only ----
+  cat("Step 1: nlme random = pdDiag(CL)\n")
+  st1 <- coef(fit0)[fixed_names]
+
+  fit1 <- nlme(
+    LDV ~ lpred_wrapper(TIME, DOSE_G,
+                        lcl_0, lcl_wt,
+                        lka_0, lka_empty,
+                        lkel_0, lkel_sex,
+                        WTc, EMPTY, SEX),
+    data = dt2,
+    fixed  = lcl_0 + lcl_wt + lka_0 + lka_empty + lkel_0 + lkel_sex ~ 1,
+    random = pdDiag(lcl_0 ~ 1),
+    groups = ~ ID,
+    start  = list(fixed = st1),
+    control = ctrl,
+    na.action = na.omit
+  )
+  cat("Step 1 VarCorr:\n"); print(VarCorr(fit1))
+
+  cat("Step 2: try random = pdDiag(CL, KEL)\n")
+  fit2 <- try(update(fit1, random = pdDiag(lcl_0 + lkel_0 ~ 1)), silent=TRUE)
+  if(inherits(fit2, "try-error")){
+    cat("Step 2 failed; keeping Step 1.\n")
+    return(list(fit = fit1, data = dt2, muWT = muWT, step = "1"))
+  }
+  cat("Step 2 VarCorr:\n"); print(VarCorr(fit2))
+
+  cat("Step 3: try random = pdDiag(CL, KA, KEL)\n")
+  fit3 <- try(update(fit2, random = pdDiag(lcl_0 + lka_0 + lkel_0 ~ 1)), silent=TRUE)
+  if(inherits(fit3, "try-error")){
+    cat("Step 3 failed; keeping Step 2.\n")
+    return(list(fit = fit2, data = dt2, muWT = muWT, step = "2"))
+  }
+
+  # Guardrail for ka SD explosion
+  vc <- VarCorr(fit3)
+  ka_sd <- suppressWarnings(as.numeric(vc["lka_0","StdDev"]))
+  if(is.na(ka_sd) || ka_sd > 5){
+    cat("KA random SD looks degenerate (", ka_sd, "). Keeping Step 2.\n", sep="")
+    return(list(fit = fit2, data = dt2, muWT = muWT, step = "2"))
+  }
+
+  cat("Step 3 VarCorr:\n"); print(VarCorr(fit3))
+  return(list(fit = fit3, data = dt2, muWT = muWT, step = "3"))
+}
+
+# Run fits
+sc <- load_pop("synthetic_chinese_popPK.csv", "SC")
+ng <- load_pop("synthetic_nigerian_popPK.csv", "NG")
+
+# If SC has tons of zeros, drop0 is usually best
+res_sc <- fit_one_pop(sc, "SC", blq="drop0")
+res_ng <- fit_one_pop(ng, "NG", blq="drop0")
+
+fit_sc <- res_sc$fit
+fit_ng <- res_ng$fit
+
+cat("\n--- SC final step:", res_sc$step, "---\n")
+print(summary(fit_sc))
+cat("\n--- NG final step:", res_ng$step, "---\n")
+print(summary(fit_ng))
+
+# Compare fixed effects (and CIs)
+get_fixed_ci <- function(fit, pop){
+  fe <- fixef(fit)
+  ci <- intervals(fit, which="fixed")$fixed
+  data.table(
+    POP = pop,
+    param = names(fe),
+    est = as.numeric(fe),
+    lo  = ci[names(fe), "lower"],
+    hi  = ci[names(fe), "upper"]
+  )
+}
+
+dt_sc <- get_fixed_ci(fit_sc, "SC")
+dt_ng <- get_fixed_ci(fit_ng, "NG")
+dt_all <- rbind(dt_sc, dt_ng)
+
+print(dt_all)
+
+# CL fold-change NG/SC (intercept on centered WT)
+cl_sc <- dt_sc[param=="lcl_0", est]
+cl_ng <- dt_ng[param=="lcl_0", est]
+cat("\nApprox CL fold-change NG/SC (exp(delta lcl_0)) =", exp(cl_ng - cl_sc), "\n")
+
+# Plot key intercepts with CI
+plot_dt <- dt_all[param %in% c("lcl_0","lka_0","lkel_0")]
+plot_dt[, param := factor(param,
+                          levels=c("lcl_0","lka_0","lkel_0"),
+                          labels=c("log(CL) intercept","log(ka) intercept","log(kel) intercept"))]
+
+ggplot(plot_dt, aes(x=param, y=est, color=POP)) +
+  geom_point(position=position_dodge(width=0.4), size=3) +
+  geom_errorbar(aes(ymin=lo, ymax=hi),
+                width=0.2,
+                position=position_dodge(width=0.4)) +
+  labs(x="", y="Estimate (log-scale) with 95% CI",
+       title="Separate nlme fits: SC vs NG (log-DV model)") +
+  theme_minimal(base_size=13) +
+  theme(axis.text.x=element_text(angle=20, hjust=1),
+        legend.title=element_blank())
+
+
+
+library(data.table)
+
+sc_obs <- fread("synthetic_chinese_popPK.csv")
+ng_obs <- fread("synthetic_nigerian_popPK.csv")
+sc_obs[, POP := "Southern Chinese"]
+ng_obs[, POP := "Nigerian"]
+obs <- rbind(sc_obs, ng_obs, fill=TRUE)
+obs <- obs[EVID == 0 & !is.na(DV)]
+
+cmax_tbl <- obs[, .(Cmax = max(DV, na.rm=TRUE)), by=.(ID, POP)]
+
+auc_tbl <- obs[, {
+  dt  <- .SD[order(TIME)][TIME > 0]
+  auc <- sum(diff(dt$TIME) * (head(dt$DV, -1) + tail(dt$DV, -1)) / 2)
+  list(AUC = auc)
+}, by=.(ID, POP)]
+
+gof_sc <- as.data.table(fit_sc)
+gof_ng <- as.data.table(fit_ng)
+gof_sc[, POP := "Southern Chinese"]
+gof_ng[, POP := "Nigerian"]
+gof    <- rbind(gof_sc, gof_ng, fill=TRUE)
+gof    <- gof[!is.na(DV) & !is.na(PRED) & PRED > 0]
+cv_tbl <- gof[, .(
+  CV_pct = round(sd(DV - PRED, na.rm=TRUE) / mean(PRED, na.rm=TRUE) * 100, 1)
+), by=POP]
+
+pk_tbl <- merge(cmax_tbl, auc_tbl, by=c("ID", "POP"))
+
+summary_tbl <- pk_tbl[, .(
+  Cmax = round(mean(Cmax), 1),
+  AUC  = round(mean(AUC),  1)
+), by=POP]
+
+summary_tbl <- merge(summary_tbl, cv_tbl, by="POP")
+setnames(summary_tbl, "CV_pct", "CV%")
+
+
+print(summary_tbl)
+```
 
 
